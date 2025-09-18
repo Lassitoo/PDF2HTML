@@ -1,4 +1,4 @@
-<!-- Enhanced document_detail.html with editing capability -->
+<!-- Enhanced document_detail.html with editing capability and floating zoom controls -->
 {% extends 'documents/base.html' %}
 
 {% block title %}{{ document.title }} - Doc Format{% endblock %}
@@ -53,7 +53,7 @@
 }
 
 .editing-controls {
-    position: sticky;
+    position: absolute;
     top: 10px;
     right: 10px;
     z-index: 100;
@@ -86,6 +86,69 @@
     margin-top: 5px;
 }
 
+/* FLOATING ZOOM CONTROLS */
+.floating-zoom-controls {
+    position: absolute;
+    bottom: 20px;
+    right: 20px;
+    z-index: 50;
+    background: rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(10px);
+    border-radius: 12px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    padding: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.3s ease;
+    opacity: 0.8;
+}
+
+.floating-zoom-controls:hover {
+    opacity: 1;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 25px rgba(0, 0, 0, 0.2);
+}
+
+.floating-zoom-controls .btn {
+    border: none;
+    background: rgba(108, 117, 125, 0.1);
+    color: #495057;
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+    font-size: 14px;
+}
+
+.floating-zoom-controls .btn:hover {
+    background: #007bff;
+    color: white;
+    transform: scale(1.1);
+}
+
+.floating-zoom-controls .btn:active {
+    transform: scale(0.95);
+}
+
+.zoom-label {
+    font-size: 13px;
+    font-weight: 500;
+    color: #495057;
+    min-width: 40px;
+    text-align: center;
+    padding: 0 4px;
+}
+
+/* Hide original zoom controls if they exist */
+.pdf-controls {
+    display: none !important;
+}
+
 /* Table editing */
 .edit-mode .pdf-table-smart td {
     cursor: text !important;
@@ -93,6 +156,32 @@
 
 .edit-mode .pdf-table-smart td:hover {
     background: rgba(0, 123, 255, 0.1) !important;
+}
+
+/* Smooth transitions for zoom */
+.pdf-document-container {
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Mobile responsive zoom controls */
+@media (max-width: 768px) {
+    .floating-zoom-controls {
+        bottom: 10px;
+        right: 10px;
+        padding: 6px;
+        gap: 6px;
+    }
+    
+    .floating-zoom-controls .btn {
+        width: 32px;
+        height: 32px;
+        font-size: 12px;
+    }
+    
+    .zoom-label {
+        font-size: 12px;
+        min-width: 35px;
+    }
 }
 </style>
 {% endblock %}
@@ -210,27 +299,27 @@
                 <div class="save-status" id="saveStatus"></div>
               </div>
 
+              <!-- Floating Zoom Controls -->
+              {% if document.file_type == 'pdf' %}
+                <div class="floating-zoom-controls" id="floatingZoomControls">
+                  <button type="button" class="btn" onclick="stepZoom(-0.1)" title="Zoom - (Ctrl -)">
+                    <i class="bi bi-zoom-out"></i>
+                  </button>
+                  <span id="zoomLabel" class="zoom-label">100%</span>
+                  <button type="button" class="btn" onclick="stepZoom(0.1)" title="Zoom + (Ctrl +)">
+                    <i class="bi bi-zoom-in"></i>
+                  </button>
+                  <div style="width: 1px; height: 20px; background: rgba(108, 117, 125, 0.3); margin: 0 4px;"></div>
+                  <button type="button" class="btn" onclick="zoomDocument(1)" title="Réinitialiser (Ctrl 0)">
+                    <i class="bi bi-aspect-ratio"></i>
+                  </button>
+                </div>
+              {% endif %}
+
               {% if format_info.generated_css %}<style>{{ format_info.generated_css|safe }}</style>{% endif %}
               <div class="pdf-document-container" id="pdfContainer">
                 {{ document.formatted_content|safe }}
               </div>
-
-              {% if document.file_type == 'pdf' %}
-                <div class="pdf-controls">
-                  <div class="btn-group btn-group-sm">
-                    <button type="button" class="btn btn-outline-secondary" onclick="stepZoom(-0.1)" title="Zoom - (Ctrl -)">
-                      <i class="bi bi-zoom-out"></i>
-                    </button>
-                    <button type="button" class="btn btn-outline-secondary" onclick="zoomDocument(1)" title="100% (Ctrl 0)">
-                      <i class="bi bi-aspect-ratio"></i>
-                    </button>
-                    <button type="button" class="btn btn-outline-secondary" onclick="stepZoom(0.1)" title="Zoom + (Ctrl +)">
-                      <i class="bi bi-zoom-in"></i>
-                    </button>
-                  </div>
-                  <span id="zoomLabel" class="ms-2 text-muted small">100%</span>
-                </div>
-              {% endif %}
             </div>
           </div>
 
@@ -573,8 +662,63 @@ function cancelEdit() {
   }
 }
 
-// Keyboard shortcuts
+// Enhanced zoom functionality with floating controls
+let currentZoom = 1.0;
+const MIN_ZOOM = 0.3, MAX_ZOOM = 3.0, ZOOM_STEP = 0.1;
+
+function updateZoomLabel(){ 
+  const z = document.getElementById('zoomLabel'); 
+  if(z) z.textContent = Math.round(currentZoom * 100) + '%'; 
+}
+
+function applyZoom(scale){
+  const c = document.getElementById('pdfContainer'); 
+  if(!c) return;
+  
+  currentZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, scale));
+  c.style.transform = `scale(${currentZoom})`;
+  c.style.transformOrigin = 'top left';
+  
+  // Add smooth animation
+  c.style.transition = 'transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)';
+  
+  localStorage.setItem('pdf_zoom', String(currentZoom));
+  updateZoomLabel();
+  
+  // Show visual feedback
+  const controls = document.getElementById('floatingZoomControls');
+  if (controls) {
+    controls.style.transform = 'scale(1.05)';
+    setTimeout(() => {
+      controls.style.transform = 'scale(1)';
+    }, 150);
+  }
+}
+
+function zoomDocument(scale){ 
+  applyZoom(scale); 
+}
+
+function stepZoom(delta){ 
+  applyZoom(currentZoom + delta); 
+}
+
+// Zoom keyboard shortcuts
 document.addEventListener('keydown', function(e) {
+  if (e.ctrlKey || e.metaKey) {
+    if (e.key === '0') {
+      e.preventDefault();
+      zoomDocument(1);
+    } else if (e.key === '=' || e.key === '+') {
+      e.preventDefault();
+      stepZoom(ZOOM_STEP);
+    } else if (e.key === '-') {
+      e.preventDefault();
+      stepZoom(-ZOOM_STEP);
+    }
+  }
+  
+  // Edit mode shortcuts
   if (!isEditMode) return;
   
   if (e.ctrlKey || e.metaKey) {
@@ -594,30 +738,19 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
-// Rest of your existing JavaScript...
-// (zoom functions, delete functions, etc.)
-
-// Existing zoom and other functionality
-let currentZoom = 1.0;
-const MIN_ZOOM = 0.3, MAX_ZOOM = 3.0, ZOOM_STEP = 0.1;
-
-function updateZoomLabel(){ 
-  const z=document.getElementById('zoomLabel'); 
-  if(z) z.textContent=Math.round(currentZoom*100)+'%'; 
-}
-
-function applyZoom(scale){
-  const c = document.getElementById('pdfContainer'); 
-  if(!c) return;
-  currentZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, scale));
-  c.style.transform = `scale(${currentZoom})`;
-  c.style.transformOrigin = 'top left';
-  localStorage.setItem('pdf_zoom', String(currentZoom));
-  updateZoomLabel();
-}
-
-function zoomDocument(scale){ applyZoom(scale); }
-function stepZoom(delta){ applyZoom(currentZoom + delta); }
+// Wheel zoom functionality
+document.addEventListener('DOMContentLoaded', function() {
+  const viewer = document.getElementById('documentViewer');
+  if (viewer) {
+    viewer.addEventListener('wheel', function(e) {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const delta = e.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP;
+        stepZoom(delta);
+      }
+    });
+  }
+});
 
 function showAlert(type, message){
   const el=document.createElement('div');
@@ -641,7 +774,5 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 window.addEventListener('beforeunload', stopStatusCheck);
-
-
 </script>
 {% endblock %}
