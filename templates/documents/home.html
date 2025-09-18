@@ -1,0 +1,203 @@
+{% extends 'documents/base.html' %}
+
+{% block title %}Accueil - Doc Format{% endblock %}
+
+{% block content %}
+<div class="row">
+    <!-- Hero Section -->
+    <div class="col-12 mb-5">
+        <div class="jumbotron bg-primary text-white rounded p-5">
+            <h1 class="display-4">
+                <i class="bi bi-file-text me-3"></i>Doc Format
+            </h1>
+            <p class="lead">
+                Extrayez et conservez parfaitement le formatage de vos documents. 
+                PDF, Word, Excel - tous vos formats préférés avec leur mise en forme originale.
+            </p>
+            <hr class="my-4" style="border-color: rgba(255,255,255,0.3);">
+            <p>
+                Téléchargez vos documents et obtenez une version HTML fidèle avec images, tableaux, 
+                polices et styles préservés.
+            </p>
+            <a class="btn btn-light btn-lg" href="{% url 'documents:upload' %}" role="button">
+                <i class="bi bi-cloud-upload me-2"></i>Télécharger un document
+            </a>
+        </div>
+    </div>
+</div>
+
+<div class="row mb-5">
+    <!-- Statistiques -->
+    <div class="col-md-3 mb-3">
+        <div class="card text-center border-primary">
+            <div class="card-body">
+                <i class="bi bi-files display-4 text-primary mb-3"></i>
+                <h3 class="text-primary">{{ total_docs }}</h3>
+                <p class="text-muted mb-0">Documents Total</p>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3 mb-3">
+        <div class="card text-center border-success">
+            <div class="card-body">
+                <i class="bi bi-check-circle display-4 text-success mb-3"></i>
+                <h3 class="text-success">{{ processed_docs }}</h3>
+                <p class="text-muted mb-0">Traités</p>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3 mb-3">
+        <div class="card text-center border-warning">
+            <div class="card-body">
+                <i class="bi bi-clock display-4 text-warning mb-3"></i>
+                <h3 class="text-warning">{{ processing_docs }}</h3>
+                <p class="text-muted mb-0">En cours</p>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3 mb-3">
+        <div class="card text-center border-danger">
+            <div class="card-body">
+                <i class="bi bi-exclamation-triangle display-4 text-danger mb-3"></i>
+                <h3 class="text-danger">{{ error_docs }}</h3>
+                <p class="text-muted mb-0">Erreurs</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <!-- Fonctionnalités -->
+    <div class="col-md-6 mb-4">
+        <div class="card h-100">
+            <div class="card-header bg-primary text-white">
+                <h5 class="mb-0">
+                    <i class="bi bi-star me-2"></i>Fonctionnalités
+                </h5>
+            </div>
+            <div class="card-body">
+                <ul class="list-unstyled">
+                    <li class="mb-3">
+                        <i class="bi bi-check-circle text-success me-2"></i>
+                        <strong>Préservation du formatage</strong><br>
+                        <small class="text-muted">Polices, couleurs, tailles et styles conservés</small>
+                    </li>
+                    <li class="mb-3">
+                        <i class="bi bi-check-circle text-success me-2"></i>
+                        <strong>Images intégrées</strong><br>
+                        <small class="text-muted">Extraction et intégration automatique des images</small>
+                    </li>
+                    <li class="mb-3">
+                        <i class="bi bi-check-circle text-success me-2"></i>
+                        <strong>Structure préservée</strong><br>
+                        <small class="text-muted">Tableaux, listes et hiérarchie maintenue</small>
+                    </li>
+                    <li class="mb-0">
+                        <i class="bi bi-check-circle text-success me-2"></i>
+                        <strong>Export HTML</strong><br>
+                        <small class="text-muted">Téléchargement du résultat en HTML complet</small>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Documents récents -->
+    <div class="col-md-6 mb-4">
+        <div class="card h-100">
+            <div class="card-header bg-secondary text-white">
+                <h5 class="mb-0">
+                    <i class="bi bi-clock-history me-2"></i>Documents récents
+                </h5>
+            </div>
+            <div class="card-body">
+                {% if recent_docs %}
+                    {% for doc in recent_docs %}
+                        <div class="d-flex align-items-center mb-3 {% if not forloop.last %}border-bottom pb-3{% endif %}">
+                            <div class="me-3">
+                                {% if doc.file_type == 'pdf' %}
+                                    <i class="bi bi-file-earmark-pdf text-danger fs-4"></i>
+                                {% elif doc.file_type == 'docx' or doc.file_type == 'doc' %}
+                                    <i class="bi bi-file-earmark-word text-primary fs-4"></i>
+                                {% elif doc.file_type == 'xlsx' or doc.file_type == 'xls' %}
+                                    <i class="bi bi-file-earmark-excel text-success fs-4"></i>
+                                {% else %}
+                                    <i class="bi bi-file-earmark-text fs-4"></i>
+                                {% endif %}
+                            </div>
+                            <div class="flex-grow-1">
+                                <h6 class="mb-1">
+                                    <a href="{% url 'documents:detail' doc.pk %}" class="text-decoration-none">
+                                        {{ doc.title|truncatechars:30 }}
+                                    </a>
+                                </h6>
+                                <small class="text-muted">
+                                    {{ doc.uploaded_at|date:"d/m/Y H:i" }} - 
+                                    <span class="badge bg-{% if doc.status == 'completed' %}success{% elif doc.status == 'processing' %}warning{% elif doc.status == 'error' %}danger{% else %}secondary{% endif %}">
+                                        {{ doc.get_status_display }}
+                                    </span>
+                                </small>
+                            </div>
+                        </div>
+                    {% endfor %}
+                    
+                    <div class="text-center mt-3">
+                        <a href="{% url 'documents:list' %}" class="btn btn-outline-primary btn-sm">
+                            Voir tous les documents
+                        </a>
+                    </div>
+                {% else %}
+                    <div class="text-center text-muted py-4">
+                        <i class="bi bi-inbox display-4 mb-3"></i>
+                        <p>Aucun document téléchargé pour le moment.</p>
+                        <a href="{% url 'documents:upload' %}" class="btn btn-primary">
+                            Télécharger votre premier document
+                        </a>
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Guide rapide -->
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-info text-white">
+                <h5 class="mb-0">
+                    <i class="bi bi-question-circle me-2"></i>Comment ça marche ?
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="row text-center">
+                    <div class="col-md-4 mb-3">
+                        <div class="mb-3">
+                            <i class="bi bi-cloud-upload display-1 text-primary"></i>
+                        </div>
+                        <h5>1. Téléchargez</h5>
+                        <p class="text-muted">Sélectionnez votre document PDF, Word, Excel ou autre format supporté</p>
+                    </div>
+                    <div class="col-md-4 mb-3">
+                        <div class="mb-3">
+                            <i class="bi bi-gear-fill display-1 text-warning"></i>
+                        </div>
+                        <h5>2. Traitement</h5>
+                        <p class="text-muted">Notre système extrait le contenu en préservant le formatage original</p>
+                    </div>
+                    <div class="col-md-4 mb-3">
+                        <div class="mb-3">
+                            <i class="bi bi-download display-1 text-success"></i>
+                        </div>
+                        <h5>3. Téléchargez</h5>
+                        <p class="text-muted">Récupérez votre document en HTML avec le style parfaitement conservé</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

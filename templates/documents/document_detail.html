@@ -1,0 +1,333 @@
+{# template/documents/document_detail.html #}
+{% extends 'documents/base.html' %}
+
+{% block title %}{{ document.title }} - Doc Format{% endblock %}
+
+{% block extra_css %}
+<style>
+/* Conteneur d’aperçu plein écran */
+.fullscreen-preview {
+    height: calc(100vh - 220px); /* garde de la place pour le header et les onglets */
+    overflow: auto;
+    background: #f5f5f5;
+    border-radius: 8px;
+    border: 1px solid #dee2e6;
+    position: relative;
+}
+
+/* wrapper qui reçoit le scale */
+.pdf-document-container {
+    width: max-content;              /* évite de compresser le contenu au zoom */
+    min-width: 100%;
+    transform-origin: top left;
+    transition: transform 0.2s ease;
+    will-change: transform;
+}
+
+/* pages rendues par le backend (pdf-page-exact/pdf-page) */
+.pdf-page, .pdf-page-exact {
+    position: relative !important;
+    background: white !important;
+    margin: 20px auto !important;
+    border: 1px solid #ddd !important;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.12) !important;
+    border-radius: 4px !important;
+}
+
+/* texte sélectionnable */
+.pdf-text-element, .pdf-footnote, .pdf-cell > div {
+    position: absolute !important;
+    overflow: visible !important;
+    user-select: text !important;
+    z-index: 2 !important;
+}
+
+/* images en dessous du texte pour garder la sélection */
+.pdf-page img, .pdf-page-exact img { 
+    position: absolute !important;
+    max-width: none !important;
+    z-index: 0 !important;
+    pointer-events: none !important;
+}
+
+/* barre de zoom discrète */
+.pdf-controls {
+    position: sticky;
+    bottom: 10px;
+    right: 10px;
+    text-align: right;
+    z-index: 10;
+    padding: 8px;
+}
+.pdf-controls .btn {
+    background: rgba(255,255,255,0.9);
+    border: 1px solid rgba(0,0,0,0.2);
+}
+.pdf-controls .btn:hover { background: #fff; }
+
+/* états */
+.processing-status { text-align:center; padding:40px 20px; }
+.status-icon { font-size: 4rem; margin-bottom: .75rem; }
+
+/* onglets */
+.tab-content { border: 1px solid #dee2e6; border-top: none; border-radius: 0 0 8px 8px; background: #fff; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col-12">
+    <!-- En-tête -->
+    <div class="d-flex justify-content-between align-items-start mb-3">
+      <div>
+        <nav aria-label="breadcrumb">
+          <ol class="breadcrumb">
+            <li class="breadcrumb-item">
+              <a href="{% url 'documents:home' %}" class="text-decoration-none"><i class="bi bi-house"></i> Accueil</a>
+            </li>
+            <li class="breadcrumb-item">
+              <a href="{% url 'documents:list' %}" class="text-decoration-none">Documents</a>
+            </li>
+            <li class="breadcrumb-item active">{{ document.title|truncatechars:30 }}</li>
+          </ol>
+        </nav>
+        <h1 class="h4 mb-2">
+          {% if document.file_type == 'pdf' %}
+            <i class="bi bi-file-earmark-pdf text-danger me-2"></i>
+          {% elif document.file_type == 'docx' or document.file_type == 'doc' %}
+            <i class="bi bi-file-earmark-word text-primary me-2"></i>
+          {% elif document.file_type == 'xlsx' or document.file_type == 'xls' %}
+            <i class="bi bi-file-earmark-excel text-success me-2"></i>
+          {% else %}
+            <i class="bi bi-file-earmark text-secondary me-2"></i>
+          {% endif %}
+          {{ document.title }}
+        </h1>
+        <div class="mb-2">
+          {% if document.status == 'completed' %}
+            <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Traité avec succès</span>
+          {% elif document.status == 'processing' %}
+            <span class="badge bg-warning" id="statusBadge"><i class="bi bi-hourglass-split me-1"></i>En cours</span>
+          {% elif document.status == 'error' %}
+            <span class="badge bg-danger"><i class="bi bi-exclamation-triangle me-1"></i>Erreur</span>
+          {% else %}
+            <span class="badge bg-secondary"><i class="bi bi-clock me-1"></i>En attente</span>
+          {% endif %}
+        </div>
+      </div>
+      <div class="d-flex gap-2">
+        {% if document.status == 'processing' %}
+          <button class="btn btn-outline-primary" onclick="refreshStatus()" id="refreshBtn"><i class="bi bi-arrow-clockwise"></i></button>
+        {% endif %}
+        {% if document.status == 'completed' %}
+          <a href="{% url 'documents:export_html' document.pk %}" class="btn btn-success"><i class="bi bi-download me-1"></i>Exporter HTML</a>
+        {% endif %}
+        <a href="{% url 'documents:download' document.pk %}" class="btn btn-outline-secondary"><i class="bi bi-file-arrow-down me-1"></i>Original</a>
+        {% if document.status == 'error' %}
+          <button class="btn btn-outline-warning" onclick="reprocessDocument()"><i class="bi bi-arrow-clockwise me-1"></i>Retraiter</button>
+        {% endif %}
+        <button class="btn btn-outline-danger" onclick="deleteDocument()"><i class="bi bi-trash me-1"></i>Supprimer</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ✅ Contenu seul, en pleine largeur -->
+  <div class="col-12">
+    {% if document.status == 'processing' %}
+      <div class="card"><div class="card-body processing-status" id="processingStatus">
+        <div class="status-icon text-warning"><i class="bi bi-gear-fill"></i></div>
+        <h3>Traitement en cours...</h3>
+        <div class="progress"><div class="progress-bar progress-bar-striped progress-bar-animated bg-warning" id="progressBar" style="width:50%"></div></div>
+      </div></div>
+
+    {% elif document.status == 'error' %}
+      <div class="card"><div class="card-body processing-status">
+        <div class="status-icon text-danger"><i class="bi bi-exclamation-triangle"></i></div>
+        <h3>Erreur de traitement</h3>
+        {% if document.error_message %}<div class="alert alert-danger"><strong>Détail :</strong><br>{{ document.error_message }}</div>{% endif %}
+        <button class="btn btn-warning" onclick="reprocessDocument()"><i class="bi bi-arrow-clockwise me-1"></i>Essayer à nouveau</button>
+      </div></div>
+
+    {% elif document.status == 'completed' %}
+      <div class="card">
+        <div class="card-header p-0">
+          <ul class="nav nav-tabs" id="contentTabs" role="tablist">
+            <li class="nav-item" role="presentation">
+              <button class="nav-link active" id="formatted-tab" data-bs-toggle="tab" data-bs-target="#formatted" type="button" role="tab">
+                <i class="bi bi-eye me-1"></i>Aperçu formaté
+              </button>
+            </li>
+            <li class="nav-item" role="presentation">
+              <button class="nav-link" id="text-tab" data-bs-toggle="tab" data-bs-target="#text" type="button" role="tab">
+                <i class="bi bi-file-text me-1"></i>Texte brut
+              </button>
+            </li>
+          </ul>
+        </div>
+
+        <div class="tab-content">
+          <!-- Aperçu formaté plein écran -->
+          <div class="tab-pane fade show active" id="formatted" role="tabpanel">
+            <div class="fullscreen-preview">
+              {% if format_info.generated_css %}<style>{{ format_info.generated_css|safe }}</style>{% endif %}
+              <div class="pdf-document-container" id="pdfContainer">
+                {{ document.formatted_content|safe }}
+              </div>
+
+              {% if document.file_type == 'pdf' %}
+                <div class="pdf-controls">
+                  <div class="btn-group btn-group-sm">
+                    <button type="button" class="btn btn-outline-secondary" onclick="stepZoom(-0.1)" title="Zoom - (Ctrl -)">
+                      <i class="bi bi-zoom-out"></i>
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary" onclick="zoomDocument(1)" title="100% (Ctrl 0)">
+                      <i class="bi bi-aspect-ratio"></i>
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary" onclick="stepZoom(0.1)" title="Zoom + (Ctrl +)">
+                      <i class="bi bi-zoom-in"></i>
+                    </button>
+                  </div>
+                  <span id="zoomLabel" class="ms-2 text-muted small">100%</span>
+                </div>
+              {% endif %}
+            </div>
+          </div>
+
+          <!-- Texte brut -->
+          <div class="tab-pane fade" id="text" role="tabpanel">
+            <div class="fullscreen-preview" style="background:#fff">
+              <pre class="mb-0 p-3">{{ document.extracted_content }}</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    {% else %}
+      <div class="card"><div class="card-body processing-status">
+        <div class="status-icon text-secondary"><i class="bi bi-clock"></i></div>
+        <h3>En attente de traitement</h3>
+      </div></div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Modal suppression -->
+<div class="modal fade" id="deleteModal" tabindex="-1">
+  <div class="modal-dialog"><div class="modal-content">
+    <div class="modal-header">
+      <h5 class="modal-title"><i class="bi bi-exclamation-triangle text-warning me-2"></i>Confirmer la suppression</h5>
+      <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+    </div>
+    <div class="modal-body">
+      <p>Supprimer "<strong>{{ document.title }}</strong>" ?</p>
+      <p class="text-muted small">Cette action est définitive.</p>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Annuler</button>
+      <button type="button" class="btn btn-danger" id="confirmDelete"><i class="bi bi-trash me-1"></i>Supprimer définitivement</button>
+    </div>
+  </div></div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const documentId = {{ document.pk }};
+let statusCheckInterval, deleteModal;
+
+/* ---------- ZOOM ---------- */
+let currentZoom = 1.0;
+const MIN_ZOOM = 0.3, MAX_ZOOM = 3.0, ZOOM_STEP = 0.1;
+
+function updateZoomLabel(){ const z=document.getElementById('zoomLabel'); if(z) z.textContent=Math.round(currentZoom*100)+'%'; }
+function applyZoom(scale){
+  const c = document.getElementById('pdfContainer'); if(!c) return;
+  currentZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, scale));
+  c.style.transform = `scale(${currentZoom})`;
+  c.style.transformOrigin = 'top left';
+  localStorage.setItem('pdf_zoom', String(currentZoom));
+  updateZoomLabel();
+}
+function zoomDocument(scale){ applyZoom(scale); }
+function stepZoom(delta){ applyZoom(currentZoom + delta); }
+
+document.addEventListener('keydown',(e)=>{
+  if(!e.ctrlKey) return;
+  if(e.key==='+'||e.key==='='){ e.preventDefault(); stepZoom(ZOOM_STEP); }
+  if(e.key==='-'){ e.preventDefault(); stepZoom(-ZOOM_STEP); }
+  if(e.key==='0'){ e.preventDefault(); zoomDocument(1); }
+});
+document.addEventListener('wheel',(e)=>{
+  if(e.ctrlKey){ e.preventDefault(); stepZoom(e.deltaY>0? -ZOOM_STEP : ZOOM_STEP); }
+},{passive:false});
+/* ------ FIN ZOOM ------ */
+
+document.addEventListener('DOMContentLoaded', function () {
+  deleteModal = new bootstrap.Modal(document.getElementById('deleteModal'));
+
+  {% if document.status == 'processing' %} startStatusCheck(); {% endif %}
+
+  const delBtn = document.getElementById('confirmDelete');
+  if (delBtn) delBtn.addEventListener('click', performDelete);
+
+  const savedZoom = parseFloat(localStorage.getItem('pdf_zoom') || '1');
+  applyZoom(isNaN(savedZoom) ? 1 : savedZoom);
+});
+
+function startStatusCheck(){ statusCheckInterval = setInterval(checkStatus, 3000); }
+function stopStatusCheck(){ if(statusCheckInterval) clearInterval(statusCheckInterval); }
+
+function checkStatus(){
+  fetch(`/documents/api/${documentId}/status/`)
+    .then(r=>r.json())
+    .then(data=>{
+      const bar=document.getElementById('progressBar');
+      if(data.status==='completed' || data.status==='error'){ stopStatusCheck(); location.reload(); }
+      else if(data.status==='processing' && bar){ bar.style.width=data.progress+'%'; }
+    })
+    .catch(err=>console.error('Erreur statut:', err));
+}
+
+function refreshStatus(){
+  const b=document.getElementById('refreshBtn');
+  if(b){ b.classList.add('refresh-btn'); setTimeout(()=>b.classList.remove('refresh-btn'),1000); }
+  checkStatus();
+}
+
+function reprocessDocument(){
+  if(!confirm('Relancer le traitement ?')) return;
+  fetch(`/documents/api/${documentId}/reprocess/`,{
+    method:'POST',
+    headers:{'X-CSRFToken':document.querySelector('[name=csrfmiddlewaretoken]').value,'Content-Type':'application/json'}
+  })
+  .then(r=>r.json())
+  .then(d=>{ if(d.success){ showAlert('success', d.message); setTimeout(()=>location.reload(),1500);} else { showAlert('danger', d.error||'Erreur de retraitement'); }})
+  .catch(()=>showAlert('danger','Erreur de connexion'));
+}
+
+function deleteDocument(){ deleteModal.show(); }
+function performDelete(){
+  fetch(`/documents/api/${documentId}/delete/`,{
+    method:'DELETE',
+    headers:{'X-CSRFToken':document.querySelector('[name=csrfmiddlewaretoken]').value,'Content-Type':'application/json'}
+  })
+  .then(r=>r.json())
+  .then(d=>{
+    if(d.success){ showAlert('success', d.message); setTimeout(()=>{ window.location.href='{% url "documents:list" %}'; }, 1200); }
+    else { showAlert('danger', d.error||'Erreur lors de la suppression'); }
+    deleteModal.hide();
+  })
+  .catch(()=>{ showAlert('danger','Erreur de connexion'); deleteModal.hide(); });
+}
+
+function showAlert(type, message){
+  const el=document.createElement('div');
+  el.className=`alert alert-${type} alert-dismissible fade show`;
+  el.innerHTML = `${message}<button type="button" class="btn-close" data-bs-dismiss="alert"></button>`;
+  const container=document.querySelector('.container'); container.insertBefore(el, container.firstChild);
+  setTimeout(()=>el.remove(), 5000);
+}
+
+window.addEventListener('beforeunload', stopStatusCheck);
+</script>
+{% endblock %}

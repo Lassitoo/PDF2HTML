@@ -1,0 +1,392 @@
+{% extends 'documents/base.html' %}
+
+{% block title %}Mes Documents - Doc Format{% endblock %}
+
+{% block extra_css %}
+<style>
+.document-card {
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.document-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+}
+
+.status-badge {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+}
+
+.file-icon {
+    font-size: 3rem;
+    margin-bottom: 1rem;
+}
+
+.filter-card {
+    background: #f8f9fa;
+    border: none;
+}
+
+.document-actions {
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+.document-card:hover .document-actions {
+    opacity: 1;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <div>
+        <h1 class="h2 mb-0">
+            <i class="bi bi-folder me-2"></i>Mes Documents
+        </h1>
+        <p class="text-muted mb-0">{{ total_documents }} document{{ total_documents|pluralize }}</p>
+    </div>
+    <a href="{% url 'documents:upload' %}" class="btn btn-primary">
+        <i class="bi bi-plus-lg me-1"></i>Nouveau document
+    </a>
+</div>
+
+<!-- Filtres -->
+<div class="card filter-card mb-4">
+    <div class="card-body">
+        <form method="get" class="row g-3">
+            <div class="col-md-3">
+                <label class="form-label small text-muted">Recherche</label>
+                {{ filter_form.search }}
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small text-muted">Statut</label>
+                {{ filter_form.status }}
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small text-muted">Type</label>
+                {{ filter_form.file_type }}
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small text-muted">Trier par</label>
+                {{ filter_form.sort_by }}
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small text-muted">Actions</label>
+                <div class="d-flex gap-2">
+                    <button type="submit" class="btn btn-outline-primary btn-sm">
+                        <i class="bi bi-funnel me-1"></i>Filtrer
+                    </button>
+                    <a href="{% url 'documents:list' %}" class="btn btn-outline-secondary btn-sm">
+                        <i class="bi bi-arrow-clockwise me-1"></i>Reset
+                    </a>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Liste des documents -->
+{% if documents %}
+    <div class="row">
+        {% for document in documents %}
+            <div class="col-lg-4 col-md-6 mb-4">
+                <div class="card document-card h-100 position-relative">
+                    <!-- Badge de statut -->
+                    <div class="status-badge">
+                        {% if document.status == 'completed' %}
+                            <span class="badge bg-success">
+                                <i class="bi bi-check-circle me-1"></i>Traité
+                            </span>
+                        {% elif document.status == 'processing' %}
+                            <span class="badge bg-warning">
+                                <i class="bi bi-hourglass-split me-1"></i>En cours
+                            </span>
+                        {% elif document.status == 'error' %}
+                            <span class="badge bg-danger">
+                                <i class="bi bi-exclamation-triangle me-1"></i>Erreur
+                            </span>
+                        {% else %}
+                            <span class="badge bg-secondary">
+                                <i class="bi bi-clock me-1"></i>En attente
+                            </span>
+                        {% endif %}
+                    </div>
+                    
+                    <div class="card-body text-center">
+                        <!-- Icône du fichier -->
+                        <div class="file-icon">
+                            {% if document.file_type == 'pdf' %}
+                                <i class="bi bi-file-earmark-pdf text-danger"></i>
+                            {% elif document.file_type == 'docx' or document.file_type == 'doc' %}
+                                <i class="bi bi-file-earmark-word text-primary"></i>
+                            {% elif document.file_type == 'xlsx' or document.file_type == 'xls' %}
+                                <i class="bi bi-file-earmark-excel text-success"></i>
+                            {% elif document.file_type == 'txt' %}
+                                <i class="bi bi-file-earmark-text text-info"></i>
+                            {% elif document.file_type == 'html' %}
+                                <i class="bi bi-file-earmark-code text-warning"></i>
+                            {% else %}
+                                <i class="bi bi-file-earmark text-secondary"></i>
+                            {% endif %}
+                        </div>
+                        
+                        <!-- Titre -->
+                        <h5 class="card-title mb-2">
+                            <a href="{% url 'documents:detail' document.pk %}" 
+                               class="text-decoration-none text-dark"
+                               title="{{ document.title }}">
+                                {{ document.title|truncatechars:30 }}
+                            </a>
+                        </h5>
+                        
+                        <!-- Description -->
+                        {% if document.description %}
+                            <p class="card-text text-muted small mb-2">
+                                {{ document.description|truncatechars:60 }}
+                            </p>
+                        {% endif %}
+                        
+                        <!-- Métadonnées -->
+                        <div class="mb-3">
+                            <small class="text-muted">
+                                <i class="bi bi-calendar3 me-1"></i>
+                                {{ document.uploaded_at|date:"d/m/Y H:i" }}
+                            </small><br>
+                            <small class="text-muted">
+                                <i class="bi bi-hdd me-1"></i>
+                                {{ document.file_size|filesizeformat }}
+                            </small>
+                            {% if document.author %}
+                                <br><small class="text-muted">
+                                    <i class="bi bi-person me-1"></i>
+                                    {{ document.author|truncatechars:20 }}
+                                </small>
+                            {% endif %}
+                        </div>
+                    </div>
+                    
+                    <!-- Actions -->
+                    <div class="card-footer bg-transparent border-0 document-actions">
+                        <div class="d-flex justify-content-center gap-2">
+                            <a href="{% url 'documents:detail' document.pk %}" 
+                               class="btn btn-outline-primary btn-sm"
+                               title="Voir les détails">
+                                <i class="bi bi-eye"></i>
+                            </a>
+                            
+                            {% if document.status == 'completed' %}
+                                <a href="{% url 'documents:export_html' document.pk %}" 
+                                   class="btn btn-outline-success btn-sm"
+                                   title="Exporter en HTML">
+                                    <i class="bi bi-download"></i>
+                                </a>
+                            {% endif %}
+                            
+                            {% if document.status == 'error' %}
+                                <button class="btn btn-outline-warning btn-sm"
+                                        onclick="reprocessDocument({{ document.pk }})"
+                                        title="Retraiter">
+                                    <i class="bi bi-arrow-clockwise"></i>
+                                </button>
+                            {% endif %}
+                            
+                            <button class="btn btn-outline-danger btn-sm"
+                                    onclick="deleteDocument({{ document.pk }}, '{{ document.title|escapejs }}')"
+                                    title="Supprimer">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        {% endfor %}
+    </div>
+    
+    <!-- Pagination -->
+    {% if documents.has_other_pages %}
+        <nav aria-label="Navigation des pages">
+            <ul class="pagination justify-content-center">
+                {% if documents.has_previous %}
+                    <li class="page-item">
+                        <a class="page-link" href="?page=1{% if request.GET.search %}&search={{ request.GET.search }}{% endif %}{% if request.GET.status %}&status={{ request.GET.status }}{% endif %}{% if request.GET.file_type %}&file_type={{ request.GET.file_type }}{% endif %}{% if request.GET.sort_by %}&sort_by={{ request.GET.sort_by }}{% endif %}">
+                            <i class="bi bi-chevron-double-left"></i>
+                        </a>
+                    </li>
+                    <li class="page-item">
+                        <a class="page-link" href="?page={{ documents.previous_page_number }}{% if request.GET.search %}&search={{ request.GET.search }}{% endif %}{% if request.GET.status %}&status={{ request.GET.status }}{% endif %}{% if request.GET.file_type %}&file_type={{ request.GET.file_type }}{% endif %}{% if request.GET.sort_by %}&sort_by={{ request.GET.sort_by }}{% endif %}">
+                            <i class="bi bi-chevron-left"></i>
+                        </a>
+                    </li>
+                {% endif %}
+                
+                <li class="page-item active">
+                    <span class="page-link">
+                        {{ documents.number }} sur {{ documents.paginator.num_pages }}
+                    </span>
+                </li>
+                
+                {% if documents.has_next %}
+                    <li class="page-item">
+                        <a class="page-link" href="?page={{ documents.next_page_number }}{% if request.GET.search %}&search={{ request.GET.search }}{% endif %}{% if request.GET.status %}&status={{ request.GET.status }}{% endif %}{% if request.GET.file_type %}&file_type={{ request.GET.file_type }}{% endif %}{% if request.GET.sort_by %}&sort_by={{ request.GET.sort_by }}{% endif %}">
+                            <i class="bi bi-chevron-right"></i>
+                        </a>
+                    </li>
+                    <li class="page-item">
+                        <a class="page-link" href="?page={{ documents.paginator.num_pages }}{% if request.GET.search %}&search={{ request.GET.search }}{% endif %}{% if request.GET.status %}&status={{ request.GET.status }}{% endif %}{% if request.GET.file_type %}&file_type={{ request.GET.file_type }}{% endif %}{% if request.GET.sort_by %}&sort_by={{ request.GET.sort_by }}{% endif %}">
+                            <i class="bi bi-chevron-double-right"></i>
+                        </a>
+                    </li>
+                {% endif %}
+            </ul>
+        </nav>
+    {% endif %}
+    
+{% else %}
+    <!-- État vide -->
+    <div class="text-center py-5">
+        <i class="bi bi-inbox display-1 text-muted mb-4"></i>
+        <h3 class="text-muted mb-3">Aucun document trouvé</h3>
+        
+        {% if request.GET %}
+            <p class="text-muted mb-4">Essayez de modifier vos critères de recherche.</p>
+            <a href="{% url 'documents:list' %}" class="btn btn-outline-primary me-2">
+                <i class="bi bi-arrow-clockwise me-1"></i>Voir tous les documents
+            </a>
+        {% else %}
+            <p class="text-muted mb-4">Commencez par télécharger votre premier document.</p>
+        {% endif %}
+        
+        <a href="{% url 'documents:upload' %}" class="btn btn-primary">
+            <i class="bi bi-plus-lg me-1"></i>Télécharger un document
+        </a>
+    </div>
+{% endif %}
+
+<!-- Modales -->
+<!-- Modal de confirmation de suppression -->
+<div class="modal fade" id="deleteModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-exclamation-triangle text-warning me-2"></i>
+                    Confirmer la suppression
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p>Êtes-vous sûr de vouloir supprimer le document "<strong id="deleteDocumentTitle"></strong>" ?</p>
+                <p class="text-muted small">Cette action est irréversible.</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Annuler</button>
+                <button type="button" class="btn btn-danger" id="confirmDelete">
+                    <i class="bi bi-trash me-1"></i>Supprimer
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let deleteModal;
+let documentToDelete = null;
+
+document.addEventListener('DOMContentLoaded', function() {
+    deleteModal = new bootstrap.Modal(document.getElementById('deleteModal'));
+    
+    // Confirmation de suppression
+    document.getElementById('confirmDelete').addEventListener('click', function() {
+        if (documentToDelete) {
+            performDelete(documentToDelete);
+        }
+    });
+});
+
+function deleteDocument(documentId, documentTitle) {
+    documentToDelete = documentId;
+    document.getElementById('deleteDocumentTitle').textContent = documentTitle;
+    deleteModal.show();
+}
+
+function performDelete(documentId) {
+    fetch(`/documents/api/${documentId}/delete/`, {
+        method: 'DELETE',
+        headers: {
+            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
+            'Content-Type': 'application/json'
+        }
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Afficher un message de succès
+            showAlert('success', data.message);
+            // Recharger la page après un délai
+            setTimeout(() => {
+                window.location.reload();
+            }, 1000);
+        } else {
+            showAlert('danger', data.error || 'Erreur lors de la suppression');
+        }
+        deleteModal.hide();
+    })
+    .catch(error => {
+        console.error('Erreur:', error);
+        showAlert('danger', 'Erreur de connexion');
+        deleteModal.hide();
+    });
+}
+
+function reprocessDocument(documentId) {
+    if (!confirm('Relancer le traitement de ce document ?')) {
+        return;
+    }
+    
+    fetch(`/documents/api/${documentId}/reprocess/`, {
+        method: 'POST',
+        headers: {
+            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
+            'Content-Type': 'application/json'
+        }
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            showAlert('success', data.message);
+            setTimeout(() => {
+                window.location.reload();
+            }, 1000);
+        } else {
+            showAlert('danger', data.error || 'Erreur lors du retraitement');
+        }
+    })
+    .catch(error => {
+        console.error('Erreur:', error);
+        showAlert('danger', 'Erreur de connexion');
+    });
+}
+
+function showAlert(type, message) {
+    const alertDiv = document.createElement('div');
+    alertDiv.className = `alert alert-${type} alert-dismissible fade show`;
+    alertDiv.innerHTML = `
+        ${message}
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    `;
+    
+    const container = document.querySelector('.container');
+    container.insertBefore(alertDiv, container.firstChild);
+    
+    // Auto-hide après 3 secondes
+    setTimeout(() => {
+        alertDiv.remove();
+    }, 3000);
+}
+</script>
+{% endblock %}
