@@ -302,3 +302,41 @@ def home(request):
     }
 
     return render(request, 'documents/home.html', context)
+
+
+# Add this function to your views.py
+
+@require_http_methods(["POST"])
+def save_document_edits(request, pk):
+    """Save user edits to the document"""
+    document = get_object_or_404(Document, pk=pk)
+    
+    # Check permissions
+    if request.user.is_authenticated and document.uploaded_by != request.user:
+        return JsonResponse({'error': 'Permission refusée'}, status=403)
+    
+    try:
+        data = json.loads(request.body)
+        formatted_content = data.get('formatted_content', '')
+        extracted_content = data.get('extracted_content', '')
+        
+        if not formatted_content:
+            return JsonResponse({'error': 'Contenu formaté manquant'}, status=400)
+        
+        # Update document with edited content
+        document.formatted_content = formatted_content
+        document.extracted_content = extracted_content
+        
+        # Update modification timestamp
+        document.processed_at = timezone.now()
+        document.save()
+        
+        return JsonResponse({
+            'success': True,
+            'message': 'Modifications sauvegardées avec succès'
+        })
+        
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Données JSON invalides'}, status=400)
+    except Exception as e:
+        return JsonResponse({'error': f'Erreur serveur: {str(e)}'}, status=500)

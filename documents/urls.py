@@ -18,4 +18,6 @@ urlpatterns = [
     # Téléchargements
     path('<int:pk>/download/', views.download_original, name='download'),
     path('<int:pk>/export-html/', views.export_html, name='export_html'),
+    path('api/<int:pk>/save-edits/', views.save_document_edits, name='save_edits'),
+
 ]
