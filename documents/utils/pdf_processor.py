@@ -1,8 +1,21 @@
 # documents/utils/pdf_processor.py
 import base64
 import io
+import re
 from datetime import datetime
 from django.utils import timezone
+# OCR (optionnel)
+try:
+    import pytesseract
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+    from PIL import Image
+    # AJOUT:
+    from PIL import ImageDraw
+
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
 
 # Gestion des imports avec fallback
 try:
@@ -22,7 +35,7 @@ try:
     import pytesseract
 
     # Ajuste si besoin le chemin Windows :
-    # pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
     from PIL import Image
     OCR_AVAILABLE = True
@@ -38,6 +51,127 @@ class PDFProcessor:
     def __init__(self):
         # Pas de facteur d'échelle - on garde les coordonnées PDF exactes
         self.scale_factor = 1.0
+
+        # Flags PyMuPDF pour préserver ligatures & espaces (améliore ≤ ≥ ≠, etc.)
+        if PYMUPDF_AVAILABLE:
+            self.TEXT_PRESERVE_LIGATURES = getattr(fitz, "TEXT_PRESERVE_LIGATURES", 8)
+            self.TEXT_PRESERVE_WHITESPACE = getattr(fitz, "TEXT_PRESERVE_WHITESPACE", 2)
+            self._text_flags = self.TEXT_PRESERVE_LIGATURES | self.TEXT_PRESERVE_WHITESPACE
+
+    def _normalize_pua_symbols(self, text: str) -> str:
+        """
+        Remap des glyphes Private Use Area (PUA) fréquemment vus en PDF
+        (Symbol/Wingdings/Dingbats) vers l’Unicode standard.
+        """
+        if not text:
+            return text
+
+        pua_map = {
+            # opérateurs
+            '\uf0a3': '≤',  # 
+            '\uf0b3': '≥',  # 
+            '\uf0bd': '≠',  # 
+            '\uf0b1': '±',  # 
+            # micro/signes divers rencontrés
+            '\uf06f': 'µ',  #  (souvent map micro/mu selon la fonte)
+            # puces (bullets)
+            '\uf0b7': '•',  #  / bullet Wingdings
+            '\uf0a7': '▪',  #  / small square bullet
+            '\uf0d8': '•',  #  / black circle bullet (selon police)
+            '\uf0fc': '•',  #  variants parfois mappés comme bullets
+            '\uf0e7': '•',  #  (selon fichiers, mieux vaut tomber sur • que laisser PUA)
+        }
+
+        return ''.join(pua_map.get(ch, ch) for ch in text)
+
+
+    def _ocr_symbols_from_drawings(self, page, existing_elements, dpi=400):
+        """
+        OCR 'second passe' pour détecter des symboles (≤ ≥ ≠ < > = ± µ μ) présents
+        en tant que DESSINS/IMAGES. On masque le texte déjà extrait puis on OCR le reste.
+        """
+        if not OCR_AVAILABLE:
+            return []
+
+        try:
+            # 1) Rasterise la page en haute résolution
+            scale = dpi / 72.0
+            pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+            mode = "RGB" if getattr(pix, "n", 3) >= 3 else "L"
+            img = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
+            if mode == "L":
+                img = img.convert("RGB")
+
+            # 2) Masque les zones de texte déjà connues (pour ne garder que dessins/images)
+            draw = ImageDraw.Draw(img)
+
+            pw, ph = float(page.rect.width), float(page.rect.height)
+            sx, sy = (pix.width / max(1.0, pw), pix.height / max(1.0, ph))
+
+            inflate = 1.5  # petit padding en px PDF autour des bboxes texte
+            for e in existing_elements or []:
+                x0 = max(0, int((e['x0'] - inflate) * sx))
+                y0 = max(0, int((e['y0'] - inflate) * sy))
+                x1 = min(pix.width, int((e['x1'] + inflate) * sx))
+                y1 = min(pix.height, int((e['y1'] + inflate) * sy))
+                draw.rectangle([x0, y0, x1, y1], fill="white")
+
+            # 3) OCR très restreint sur les symboles
+            whitelist = (
+                "0123456789"
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                " <>==/+-"
+                "≤≥≠±µμ"  # U+2264, U+2265, U+2260, plus/moins, micro
+            )
+            config = (
+                    r'--oem 3 --psm 6 '
+                    r'-c preserve_interword_spaces=1 '
+                    r'-c tessedit_char_whitelist=' + whitelist
+            )
+
+            data = pytesseract.image_to_data(
+                img, lang="eng+fra", config=config, output_type=pytesseract.Output.DICT
+            )
+
+            found = []
+            eid = 10_000_000  # id décalé pour ne pas collisionner
+            for i in range(len(data.get("text", []))):
+                t = (data["text"][i] or "").strip()
+                if not t:
+                    continue
+                try:
+                    conf = float(data.get("conf", ["-1"])[i])
+                except Exception:
+                    conf = -1.0
+                if conf < 70:
+                    continue
+
+                # on garde uniquement les symboles/operateurs
+                if not re.fullmatch(r"[≤≥≠±<>+=\-µμ]{1,2}", t):
+                    continue
+
+                # bbox en coords PDF
+                x = float(data["left"][i]) / sx
+                y = float(data["top"][i]) / sy
+                w = float(data["width"][i]) / sx
+                h = float(data["height"][i]) / sy
+
+                found.append({
+                    "id": eid,
+                    "text": self._normalize_math_symbols(t),
+                    "bbox": (x, y, x + w, y + h),
+                    "x0": x, "y0": y, "x1": x + w, "y1": y + h,
+                    "font": "OCR-SYMBOL",
+                    "size": max(8, min(14, h * 0.9)),
+                    "flags": 0,
+                    "color": 0,
+                })
+                eid += 1
+
+            return found
+        except Exception as e:
+            print(f"OCR drawings failed: {e}")
+            return []
 
     def process(self, file_path, document_instance):
         """Traite un fichier PDF en conservant la structure EXACTE"""
@@ -164,7 +298,13 @@ class PDFProcessor:
                 img = img.convert("RGB")
 
             # OCR au niveau "word" pour récupérer des bbox fines
-            data = pytesseract.image_to_data(img, lang=lang, output_type=pytesseract.Output.DICT)
+            custom = (
+                r'--oem 3 --psm 6 '
+                r'-c preserve_interword_spaces=1 '
+                r'-c tessedit_char_whitelist=0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+                r'.,;:()[]{}%/+\-–—=<>\u2264\u2265\u2260µμ mgugµgμg '
+            )
+            data = pytesseract.image_to_data(img, lang=lang, config=custom, output_type=pytesseract.Output.DICT)
 
             elements = []
             element_id = 0
@@ -174,7 +314,9 @@ class PDFProcessor:
             h_scale = page.rect.height / float(pix.height or 1)
 
             for i in range(len(data.get("text", []))):
-                text = (data["text"][i] or "").strip()
+                raw_text = (data["text"][i] or "").strip()
+                text = self._normalize_math_symbols(raw_text)
+
                 conf_raw = data.get("conf", ["-1"] * len(data["text"]))[i]
                 try:
                     conf = float(conf_raw)
@@ -207,9 +349,11 @@ class PDFProcessor:
             return []
 
     def _process_page_with_smart_tables(self, page, page_num):
-        """Traite une page avec détection intelligente des tableaux sans reconstruire
+        """
+        Traite une page avec détection intelligente des tableaux sans reconstruire
         de sous-tableaux: on ne 'snap' que sur les grilles vectorielles existantes.
         Si la page n'a pas de texte (scan), fallback OCR pour obtenir du texte sélectionnable.
+        + OCR ciblé symboles (≤ ≥ ≠ etc.) quand ils sont des dessins/images.
         """
         page_rect = page.rect
         page_width = page_rect.width
@@ -236,8 +380,11 @@ class PDFProcessor:
         '''
 
         try:
-            # 1) Texte positionné natif
-            text_dict = page.get_text("dict")
+            # 0) Overlay SVG pour conserver dessins/tracés vectoriels (sans texte)
+            page_html += self._render_svg_overlay(page)
+
+            # 1) Texte positionné natif (avec ligatures/espaces préservés)
+            text_dict = self._extract_text_dict_with_flags(page)
             all_elements = self._extract_all_positioned_elements(text_dict)
 
             # 1.b) Fallback OCR si (quasi) pas de texte natif
@@ -247,6 +394,32 @@ class PDFProcessor:
                     print("  -> OCR utilisé (page sans couche texte ou très peu de texte).")
                     all_elements = ocr_elems
                     ocr_used = True
+
+            # 1.c) Fusion des paires de spans pour composer ≤ ≥ ≠ si nécessaire
+            all_elements = self._merge_math_pairs(all_elements)
+
+            # 1.d) OCR ciblé des symboles présents en dessins/images
+            symbol_elems = self._ocr_symbols_from_drawings(page, all_elements, dpi=400)
+            if symbol_elems:
+                # éviter les doublons: on n’ajoute que si pas déjà recouvert par un span texte
+                def _overlap(a, b):
+                    ax0, ay0, ax1, ay1 = a["x0"], a["y0"], a["x1"], a["y1"]
+                    bx0, by0, bx1, by1 = b["x0"], b["y0"], b["x1"], b["y1"]
+                    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+                    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+                    if ix1 <= ix0 or iy1 <= iy0:
+                        return 0.0
+                    inter = (ix1 - ix0) * (iy1 - iy0)
+                    area = (ax1 - ax0) * (ay1 - ay0)
+                    return inter / max(area, 1e-6)
+
+                merged = []
+                for s in symbol_elems:
+                    if any(_overlap(s, e) > 0.4 for e in all_elements):
+                        continue
+                    merged.append(s)
+                if merged:
+                    all_elements = all_elements + merged
 
             # 2) Primitives vectorielles existantes (grilles / cadres)
             H, V, RECTS = self._collect_vector_primitives(page)
@@ -272,24 +445,22 @@ class PDFProcessor:
                     processed_elements.update(consumed_ids)
                     grid_bboxes.append(zone_bbox)
                     continue
-
                 # (B) Reconstruction désactivée : NE PAS créer de <table> synthétique.
-                #     Le texte de cette zone sera rendu plus bas en éléments absolus.
 
             # 4) Rendu du texte restant (éléments non consommés par le 'snap')
             remaining = [e for e in all_elements if e['id'] not in processed_elements]
+            # ordre visuel constant
+            remaining.sort(key=lambda e: (e['y0'], e['x0']))
             for element in remaining:
                 elem_html = self._render_single_element(element, page_height)
                 page_html += elem_html
                 content += element['text'] + " "
                 fonts.add(element.get('font', ''))
 
-            # 5) Images
-            #    Si OCR a été utilisé, NE PAS poser l'image plein-page (sinon elle peut recouvrir le texte).
+            # 5) Images matricielles (XObjects)
             if not ocr_used:
                 images = self._extract_images_with_positions(page, page_num, page_height)
                 for image_data in images:
-                    # Ignorer les images "fond de page" (pleine page)
                     if image_data.get('coverage', 0) >= 0.90:
                         continue
                     page_html += f'''
@@ -307,11 +478,8 @@ class PDFProcessor:
                          "
                          alt="{image_data['name']}" />
                     '''
-            else:
-                # (facultatif) Image de fond très légère — désactivée par défaut
-                pass
 
-            # 6) Repeindre les grilles/cadres vectoriels en filtrant les rectangles internes aux grilles
+            # 6) Rendu léger des grilles/cadres résiduels (filet)
             page_html += self._render_drawings(page, grid_bboxes)
 
         except Exception as e:
@@ -319,13 +487,23 @@ class PDFProcessor:
             return self._fallback_simple_extraction(page, page_num)
 
         page_html += '</div>'
+
+        # Normalisation finale de sécurité (<= -> ≤, >= -> ≥ …) pour le texte agrégé
+        content = self._normalize_math_symbols(content)
+
         return content, page_html, images, fonts
 
+    # ======== NOUVEAU : extraction dict avec flags (ligatures ≤ ≥ ≠, etc.) ========
+    def _extract_text_dict_with_flags(self, page):
+        """Utilise TextPage avec flags pour préserver ligatures & espaces."""
+        try:
+            tp = page.get_textpage(flags=self._text_flags)
+            return tp.extractDICT()
+        except Exception:
+            return page.get_text("dict")
+
     def _compute_grid_from_lines(self, bbox, H, V, tol=1.0):
-        """
-        Calcule les bords de colonnes/lignes à partir des segments H/V présents dans 'bbox'.
-        Retourne (col_edges, row_edges) ordonnés.
-        """
+        """Calcule les bords de colonnes/lignes à partir des segments H/V dans 'bbox'."""
         x0, y0, x1, y1 = bbox
         H_in = [h for h in H if (y0 - tol <= h[1] <= y1 + tol) and (max(0, min(h[2], x1) - max(h[0], x0)) > 5)]
         V_in = [v for v in V if (x0 - tol <= v[0] <= x1 + tol) and (max(0, min(v[3], y1) - max(v[1], y0)) > 5)]
@@ -349,11 +527,7 @@ class PDFProcessor:
         return col_edges, row_edges
 
     def _render_grid_cells_with_text(self, bbox, zone_elements, H, V, padding=4):
-        """
-        Rend des wrappers <div> par cellule de la grille existante et repositionne
-        les spans de 'zone_elements' à l'intérieur (snap).
-        Retourne (html, consumed_ids).
-        """
+        """Rend des wrappers <div> par cellule de la grille existante et y 'snap' le texte."""
         html = []
         consumed_ids = set()
 
@@ -387,26 +561,27 @@ class PDFProcessor:
                         cell_spans.append(e)
                         consumed_ids.add(e["id"])
 
-                # ⚠️ ne pas bloquer la sélection : PAS de pointer-events:none
                 html.append(
                     f'<div class="pdf-cell" style="position:absolute;left:{cell_x}px;top:{cell_y}px;'
                     f'width:{cell_w}px;height:{cell_h}px;z-index:1;">'
                 )
 
-                for e in sorted(cell_spans, key=lambda s: (s["y0"], s["x0"])):
+                for e in sorted(cell_spans, key=lambda s: (s["y0"], s["x0"])):  # ordre visuel
                     rel_left = max(padding, e["x0"] - cell_x)
                     rel_top = max(padding, e["y0"] - cell_y)
                     rel_w = max(1, e["x1"] - e["x0"])
                     rel_h = max(1, e["y1"] - e["y0"])
                     is_bold = bool(e["flags"] & 16)
                     fw = "bold" if is_bold else "normal"
+
+                    safe_text = self._escape_html(self._normalize_math_symbols(e["text"]))
+
                     html.append(
                         f'<div style="position:absolute;left:{rel_left}px;top:{rel_top}px;'
                         f'width:{rel_w}px;height:{rel_h}px;white-space:pre;line-height:1.1;'
                         f'font-family:\'{self._normalize_font(e["font"])}\', Times, serif;'
                         f'font-size:{e["size"]}px;font-weight:{fw};'
-                        f'user-select:text;z-index:2;">'
-                        f'{self._escape_html(e["text"])}</div>'
+                        f'user-select:text;z-index:2;">{safe_text}</div>'
                     )
 
                 html.append('</div>')
@@ -431,10 +606,10 @@ class PDFProcessor:
             if "lines" not in block:
                 continue
 
-        # NOTE: PyMuPDF renvoie les lignes avec leurs spans (coords PDF origin haut-gauche)
             for line in block.get("lines", []):
                 for span in line.get("spans", []):
-                    text = span.get("text", "").strip()
+                    text_raw = span.get("text", "")
+                    text = self._normalize_math_symbols(text_raw).strip()
                     if not text:
                         continue
 
@@ -455,6 +630,44 @@ class PDFProcessor:
                     element_id += 1
 
         return elements
+
+    def _same_line(self, a, b, tol=1.5):
+        return (abs(a['y0'] - b['y0']) <= tol) and (abs(a['y1'] - b['y1']) <= tol)
+
+    def _merge_math_pairs(self, elements, max_dx_factor=0.6):
+        """
+        Fusionne les paires de spans adjacents '<' '=' -> '≤', '>' '=' -> '≥', '!' '=' -> '≠'
+        lorsqu'ils sont sur la même ligne et très proches.
+        Retourne une nouvelle liste d'éléments avec paires fusionnées.
+        """
+        if not elements:
+            return elements
+
+        # tri visuel (haut->bas, gauche->droite)
+        elems = sorted(elements, key=lambda e: (e['y0'], e['x0']))
+        keep = []
+        i = 0
+        while i < len(elems):
+            e = elems[i]
+            if i < len(elems) - 1:
+                n = elems[i + 1]
+                if e['text'] in ('<', '>', '!') and n['text'] == '=' and self._same_line(e, n):
+                    # proximité horizontale (gap faible vs largeur du 1er)
+                    w = max(1e-3, e['x1'] - e['x0'])
+                    gap = n['x0'] - e['x1']
+                    if gap <= max_dx_factor * w:
+                        sym = '≤' if e['text'] == '<' else ('≥' if e['text'] == '>' else '≠')
+                        # fusion : on étend la bbox du premier, on remplace le texte
+                        e = dict(e)  # copie
+                        e['text'] = sym
+                        e['x1'] = max(e['x1'], n['x1'])
+                        e['bbox'] = (e['x0'], e['y0'], e['x1'], e['y1'])
+                        keep.append(e)
+                        i += 2
+                        continue
+            keep.append(e)
+            i += 1
+        return keep
 
     def _detect_smart_table_zones(self, elements):
         """Détecte les zones qui contiennent des tableaux (seuils plus stricts)."""
@@ -489,7 +702,7 @@ class PDFProcessor:
             if self._is_smart_table_line(line):
                 potential.append(line)
             else:
-                if len(potential) >= 4:  # plus strict
+                if len(potential) >= 4:
                     tz = []
                     for pl in potential:
                         tz.extend(pl)
@@ -527,11 +740,6 @@ class PDFProcessor:
                            'Diluent', 'Lubricant', 'Binding', 'Flow', 'Disintegrant', 'Film-coating']
         if any(keyword in text_combined for keyword in pharma_keywords):
             criteria_met += 2
-
-        if len(line_elements) >= 3:
-            avg_text_length = sum(len(elem['text']) for elem in line_elements) / len(line_elements)
-            if avg_text_length < 15:
-                criteria_met += 1
 
         if len(line_elements) >= 3:
             spacings = []
@@ -609,7 +817,7 @@ class PDFProcessor:
                     else:
                         cell_style += " text-align: left;"
 
-                clean_text = cell_text.strip()
+                clean_text = self._normalize_math_symbols(cell_text).strip()
                 table_html += f'<{tag} style="{cell_style}">{self._escape_html(clean_text)}</{tag}>'
 
             table_html += '</tr>'
@@ -724,7 +932,7 @@ class PDFProcessor:
     def _render_single_element(self, element, page_height):
         """Rendu d'un élément individuel avec gestion améliorée des notes"""
         css_left = element['x0']
-        css_top = element['y0']  # origine en haut-gauche, plus d'inversion
+        css_top = element['y0']
         css_width = max(1, element['x1'] - element['x0'])
         css_height = max(1, element['y1'] - element['y0'])
 
@@ -738,6 +946,8 @@ class PDFProcessor:
             str(element.get('text', '')).startswith('1 ') or
             'Ingredients of dry premix' in str(element.get('text', ''))
         )
+
+        safe_text = self._escape_html(self._normalize_math_symbols(element.get('text','')))
 
         if is_footnote:
             font_size = max(7, font_size)  # Police minimale pour lisibilité
@@ -757,10 +967,9 @@ class PDFProcessor:
                 word-wrap: break-word;
                 z-index: 2;
                 user-select: text;
-            ">{self._escape_html(element.get('text',''))}</div>
+            ">{safe_text}</div>
             '''
 
-        # Détecter les titres par taille de police
         if font_size > 12:
             font_weight = 'bold'
         css_height = max(css_height, font_size * 1.2)
@@ -780,8 +989,130 @@ class PDFProcessor:
             overflow: visible;
             z-index: 2;
             user-select: text;
-        ">{self._escape_html(element.get('text',''))}</div>
+        ">{safe_text}</div>
         '''
+
+    def _render_svg_overlay(self, page):
+        """
+        Overlay SVG sans texte : text_as_path=False permet de séparer
+        le texte (balises <text>) des vrais tracés vectoriels (paths, lignes, formes).
+        On extrait d'abord les symboles mathématiques du SVG, puis on supprime le texte.
+        """
+        try:
+            # text_as_path=False : le texte est en balises <text>, les dessins en <path>
+            svg = page.get_svg_image(matrix=fitz.Matrix(1, 1), text_as_path=False)
+
+            # Extraire les symboles mathématiques du SVG avant de supprimer le texte
+            math_symbols_html = self._extract_math_symbols_from_svg(svg, page)
+
+            # Supprimer uniquement les balises <text> (texte déjà affiché en HTML)
+            svg = re.sub(r'<text[\s\S]*?</text>', '', svg, flags=re.IGNORECASE)
+
+            return f'''
+            {math_symbols_html}
+            <div class="pdf-svg-overlay" style="
+                position:absolute;left:0;top:0;width:{page.rect.width}px;height:{page.rect.height}px;
+                z-index:0;pointer-events:none;overflow:visible;
+            ">{svg}</div>
+            '''
+        except Exception as e:
+            print(f"    SVG overlay failed: {e}")
+            return ""
+
+    def _extract_math_symbols_from_svg(self, svg, page):
+        """
+        Détecte les petits dessins vectoriels (paths) qui peuvent être des symboles mathématiques
+        et utilise OCR pour les reconnaître.
+        """
+        math_symbols_html = ""
+
+        if not OCR_AVAILABLE:
+            return math_symbols_html
+
+        try:
+            # 1) Extraire tous les paths du SVG avec leur bounding box approximative
+            path_pattern = r'<path[^>]*\s+d="([^"]+)"[^>]*/>'
+            small_paths = []
+
+            for match in re.finditer(path_pattern, svg, re.IGNORECASE):
+                path_data = match.group(1)
+                # Extraire les coordonnées du path pour estimer sa bbox
+                coords = re.findall(r'[-+]?\d*\.?\d+', path_data)
+                if len(coords) >= 4:
+                    try:
+                        nums = [float(c) for c in coords]
+                        x_coords = [nums[i] for i in range(0, len(nums), 2)]
+                        y_coords = [nums[i] for i in range(1, len(nums), 2)]
+
+                        x0, x1 = min(x_coords), max(x_coords)
+                        y0, y1 = min(y_coords), max(y_coords)
+                        width = x1 - x0
+                        height = y1 - y0
+
+                        # Détecter les petits paths (probablement des symboles)
+                        # Typiquement un symbole <= fait 10-20px de large
+                        if 5 < width < 40 and 5 < height < 30:
+                            small_paths.append({
+                                'bbox': (x0, y0, x1, y1),
+                                'width': width,
+                                'height': height
+                            })
+                    except:
+                        continue
+
+            # 2) Pour chaque petit path, extraire une image et utiliser OCR
+            for path_info in small_paths:
+                x0, y0, x1, y1 = path_info['bbox']
+
+                # Ajouter un peu de marge
+                margin = 3
+                rect = fitz.Rect(x0 - margin, y0 - margin, x1 + margin, y1 + margin)
+
+                # Vérifier que le rect est dans la page
+                if rect.x0 < 0 or rect.y0 < 0 or rect.x1 > page.rect.width or rect.y1 > page.rect.height:
+                    continue
+
+                try:
+                    # Extraire l'image de cette petite zone
+                    pix = page.get_pixmap(clip=rect, matrix=fitz.Matrix(3, 3))  # 3x zoom pour meilleure qualité
+                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+                    # OCR spécialisé pour symboles mathématiques
+                    custom_config = (
+                        r'--oem 3 --psm 10 '  # psm 10 = single character
+                        r'-c tessedit_char_whitelist=≤≥≠<>=!±×÷'
+                    )
+                    text = pytesseract.image_to_string(img, config=custom_config).strip()
+
+                    # Si on a détecté un symbole, l'ajouter
+                    if text and len(text) <= 3:
+                        # Normaliser les résultats OCR
+                        if text in ['<', '<=', 'c', 'C']:
+                            text = '≤'
+                        elif text in ['>', '>=']:
+                            text = '≥'
+                        elif text in ['!', '!=']:
+                            text = '≠'
+
+                        if text in ['≤', '≥', '≠', '±', '×', '÷']:
+                            math_symbols_html += f'''
+                            <div class="math-symbol-ocr" style="
+                                position:absolute;
+                                left:{x0}px;
+                                top:{y0}px;
+                                font-size:12px;
+                                white-space:nowrap;
+                                pointer-events:auto;
+                                z-index:3;
+                            ">{text}</div>
+                            '''
+                except Exception as e:
+                    continue
+
+        except Exception as e:
+            print(f"    Extraction symboles math du SVG échouée: {e}")
+
+        return math_symbols_html
 
     def _extract_images_with_positions(self, page, page_num, page_height):
         """Extraction des images avec positions exactes"""
@@ -798,7 +1129,6 @@ class PDFProcessor:
                         css_width = img_x1 - img_x0
                         css_height = img_y1 - img_y0
 
-                        # calcul de couverture pour éviter les pleines pages
                         page_w = page.rect.width
                         page_h = page.rect.height
                         coverage = (css_width * css_height) / float(max(1.0, page_w * page_h))
@@ -823,11 +1153,8 @@ class PDFProcessor:
 
     def _render_drawings(self, page, grid_bboxes=None):
         """
-        Rend les lignes/rectangles vectoriels.
-        - Lignes ('l') : toujours rendues (délimitent la grille).
-        - Rectangles ('re') : ignorés s'ils sont à l'intérieur d'une zone de grille détectée,
-          pour éviter les cadres "sous-tableau".
-        Les tracés sont placés en fond (z-index:0) et n'interceptent pas les événements.
+        Rend lignes/rectangles vectoriels simples en HTML (overlay léger).
+        L'overlay SVG couvre déjà l'essentiel.
         """
         if grid_bboxes is None:
             grid_bboxes = []
@@ -885,7 +1212,6 @@ class PDFProcessor:
                             continue
 
                         rect = (x0, y0, x1, y1)
-                        # filtre : ne pas peindre les rectangles internes aux grilles détectées
                         if self._rect_inside_any(rect, grid_bboxes):
                             continue
 
@@ -894,8 +1220,6 @@ class PDFProcessor:
                             f'width:{x1 - x0}px;height:{y1 - y0}px;border:1px solid #333;'
                             f'z-index:0;pointer-events:none;"></div>'
                         )
-
-                    # autres commandes ignorées
                 except Exception as e_item:
                     print(f"      Skip drawing item {it[:2]}… cause: {e_item}")
                     continue
@@ -910,7 +1234,6 @@ class PDFProcessor:
                 for it in d.get("items", []):
                     cmd = it[0] if it else None
                     if cmd == "l":
-                        # ('l', (x0,y0),(x1,y1), ...) ou ('l', x0,y0,x1,y1,...)
                         if len(it) >= 3 and isinstance(it[1], (tuple, list)):
                             x0, y0 = float(it[1][0]), float(it[1][1])
                             x1, y1 = float(it[2][0]), float(it[2][1])
@@ -919,12 +1242,11 @@ class PDFProcessor:
                             x0, y0, x1, y1 = float(x0), float(y0), float(x1), float(y1)
                         else:
                             continue
-                        if abs(y1 - y0) < 0.5:  # horizontale
+                        if abs(y1 - y0) < 0.5:
                             H.append((min(x0, x1), y0, max(x0, x1), y0))
-                        elif abs(x1 - x0) < 0.5:  # verticale
+                        elif abs(x1 - x0) < 0.5:
                             V.append((x0, min(y0, y1), x0, max(y0, y1)))
                     elif cmd == "re":
-                        # ('re', fitz.Rect) ou ('re', x0,y0,x1,y1,...)
                         if len(it) >= 2 and hasattr(it[1], "x0"):
                             r = it[1]
                             RECTS.append((float(r.x0), float(r.y0), float(r.x1), float(r.y1)))
@@ -943,10 +1265,10 @@ class PDFProcessor:
         """
         x0, y0, x1, y1 = bbox
 
-        def inside_line_h(h):  # h=(lx0, ly, lx1, ly)
+        def inside_line_h(h):
             return (y0 - 1 <= h[1] <= y1 + 1) and (max(0, min(h[2], x1) - max(h[0], x0)) > 5)
 
-        def inside_line_v(v):  # v=(lx, ly0, lx, ly1)
+        def inside_line_v(v):
             return (x0 - 1 <= v[0] <= x1 + 1) and (max(0, min(v[3], y1) - max(v[1], y0)) > 5)
 
         def inside_rect(r):
@@ -963,7 +1285,7 @@ class PDFProcessor:
 
     def _fallback_simple_extraction(self, page, page_num):
         """Extraction simple en cas d'échec"""
-        content = page.get_text() or ""
+        content = self._normalize_math_symbols(page.get_text() or "")
         page_html = f'''
         <div class="pdf-page-simple" style="
             width: 595px; height: 842px; margin: 20px auto;
@@ -997,88 +1319,21 @@ class PDFProcessor:
             return None
 
     def _generate_improved_css(self):
-        """CSS avec styles pour notes de bas de page"""
+        """CSS avec styles pour notes de bas de page & overlay SVG"""
         css_base = """
-        .pdf-document-exact {
-            background: #f0f0f0;
-            padding: 20px;
-            font-family: 'Times New Roman', Times, serif;
-        }
-
-        .pdf-page-exact {
-            position: relative !important;
-            background: white !important;
-            margin: 20px auto !important;
-            border: 1px solid #ccc !important;
-            box-shadow: 0 4px 8px rgba(0,0,0,0.1) !important;
-            transform-origin: top center;
-            transition: transform 0.3s ease;
-            overflow: visible !important;
-        }
-
-        .pdf-table-smart {
-            border-collapse: collapse !important;
-            font-family: 'Times New Roman', Times, serif !important;
-            background: white !important;
-            margin: 0 !important;
-            font-size: 9px !important;
-            line-height: 1.2 !important;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-
-        .pdf-table-smart th,
-        .pdf-table-smart td {
-            border: 1px solid #333 !important;
-            padding: 4px 6px !important;
-            vertical-align: top !important;
-            word-wrap: break-word;
-            max-width: 120px;
-        }
-
-        .pdf-table-smart th {
-            background-color: #f0f0f0 !important;
-            font-weight: bold !important;
-            text-align: center !important;
-            border-bottom: 2px solid #333 !important;
-            font-size: 9px !important;
-        }
-
-        .pdf-text-element {
-            position: absolute !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            border: none !important;
-            background: transparent !important;
-            transform: none !important;
-            font-family: 'Times New Roman', Times, serif !important;
-            z-index: 2 !important;
-            user-select: text !important;
-        }
-
-        .pdf-footnote {
-            position: absolute !important;
-            margin: 0 !important;
-            padding: 2px !important;
-            border: none !important;
-            background: transparent !important;
-            font-family: 'Times New Roman', Times, serif !important;
-            font-size: 7px !important;
-            color: #666 !important;
-            line-height: 1.2 !important;
-            max-width: 400px;
-            z-index: 2 !important;
-            user-select: text !important;
-        }
-
-        .pdf-image-exact {
-            position: absolute !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            border: none !important;
-            transform: none !important;
-            z-index: 0 !important;
-            pointer-events: none !important;
-        }
+        .pdf-document-exact { background: #f0f0f0; padding: 20px; font-family: 'Times New Roman', Times, serif; }
+        .pdf-page-exact { position: relative !important; background: white !important; margin: 20px auto !important;
+            border: 1px solid #ccc !important; box-shadow: 0 4px 8px rgba(0,0,0,0.1) !important; overflow: visible !important; }
+        .pdf-table-smart { border-collapse: collapse !important; font-family: 'Times New Roman', Times, serif !important;
+            background: white !important; margin: 0 !important; font-size: 9px !important; line-height: 1.2 !important; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .pdf-table-smart th, .pdf-table-smart td { border: 1px solid #333 !important; padding: 4px 6px !important; vertical-align: top !important; word-wrap: break-word; max-width: 120px; }
+        .pdf-table-smart th { background-color: #f0f0f0 !important; font-weight: bold !important; text-align: center !important; border-bottom: 2px solid #333 !important; font-size: 9px !important; }
+        .pdf-text-element { position: absolute !important; margin: 0 !important; padding: 0 !important; border: none !important; background: transparent !important;
+            transform: none !important; font-family: 'Times New Roman', Times, serif !important; z-index: 2 !important; user-select: text !important; }
+        .pdf-footnote { position: absolute !important; margin: 0 !important; padding: 2px !important; border: none !important; background: transparent !important;
+            font-family: 'Times New Roman', Times, serif !important; font-size: 7px !important; color: #666 !important; line-height: 1.2 !important; max-width: 400px; z-index: 2 !important; user-select: text !important; }
+        .pdf-image-exact { position: absolute !important; margin: 0 !important; padding: 0 !important; border: none !important; transform: none !important; z-index: 0 !important; pointer-events: none !important; }
+        .pdf-svg-overlay svg { width: 100% !important; height: 100% !important; display: block !important; }
         """
         return css_base
 
@@ -1115,7 +1370,6 @@ class PDFProcessor:
             'Courier-Oblique': 'Courier New',
             'Courier-BoldOblique': 'Courier New'
         }
-
         clean_name = font_name.split('+')[-1] if '+' in font_name else font_name
         return font_map.get(clean_name, clean_name)
 
@@ -1129,28 +1383,62 @@ class PDFProcessor:
                 .replace('"', '&quot;')
                 .replace("'", '&#39;'))
 
+    # ======== NOUVEAU : normalisation sûre des symboles mathématiques ========
+    def _normalize_math_symbols(self, text: str) -> str:
+        """
+        Convertit proprement certains couples ASCII en symboles mathématiques.
+        - <= -> ≤
+        - >= -> ≥
+        - != -> ≠
+        + normalise quelques tirets, puis remap PUA -> Unicode standard.
+        """
+        if not text:
+            return text
+
+        def repl_cmp(m):
+            s = m.group(0)
+            return {"<=": "≤", ">=": "≥", "!=": "≠"}.get(s, s)
+
+        # 1) ASCII pairs -> vrais symboles
+        text = re.sub(r'<=|>=|!=', repl_cmp, text)
+
+        # 2) Tirets
+        text = re.sub(r'(?<!\d)--(?!\d)', '—', text)
+
+        # 3) PUA -> Unicode
+        text = self._normalize_pua_symbols(text)
+
+        # 4) (Optionnel) Espaces lisibles autour des opérateurs
+        text = re.sub(r'\s*(≤|≥|≠|=|<|>)\s*', r' \1 ', text)
+        text = re.sub(r'\s{2,}', ' ', text).strip()
+
+        return text
+
+        def repl_cmp(m):
+            s = m.group(0)
+            return {"<=": "≤", ">=": "≥", "!=": "≠"}.get(s, s)
+
+        text = re.sub(r'<=|>=|!=', repl_cmp, text)
+        text = re.sub(r'(?<!\d)--(?!\d)', '—', text)
+        return text
+
     def _detect_tables_in_content(self, content):
         """Détection simple de tableaux dans le contenu"""
         lines = content.split('\n')
         table_indicators = 0
-
         for line in lines:
             if len(line.split()) > 3 and ('.' in line or '|' in line or '\t' in line):
                 table_indicators += 1
-
         return table_indicators > 2
 
     def _parse_pdf_date(self, pdf_date):
         """Parse une date PDF"""
         if not pdf_date:
             return None
-
         try:
             if pdf_date.startswith("D:"):
                 pdf_date = pdf_date[2:]
-
             date_part = pdf_date[:14]
-
             if len(date_part) >= 8:
                 if len(date_part) >= 14:
                     dt = datetime.strptime(date_part[:14], "%Y%m%d%H%M%S")
@@ -1159,7 +1447,6 @@ class PDFProcessor:
                 return timezone.make_aware(dt)
         except:
             pass
-
         return None
 
     # Méthodes fallback
@@ -1172,6 +1459,7 @@ class PDFProcessor:
             with pdfplumber.open(file_path) as pdf:
                 for page_num, page in enumerate(pdf.pages):
                     page_text = page.extract_text() or ""
+                    page_text = self._normalize_math_symbols(page_text)
                     content += f"\n--- Page {page_num + 1} ---\n{page_text}\n"
 
                     page_html = f'''
